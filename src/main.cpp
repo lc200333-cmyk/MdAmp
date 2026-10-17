@@ -664,7 +664,9 @@ LRESULT CALLBACK AuxiliaryProcedure(HWND window, UINT message, WPARAM wParam, LP
     case WM_GETMINMAXINFO: {
         auto* limits = reinterpret_cast<MINMAXINFO*>(lParam);
         limits->ptMinTrackSize = {S(354), S(window == app->playlist && app->playlistShade ? 17 : 164)};
-        if (window == app->playlist && app->playlistShade) limits->ptMaxTrackSize.y = S(17);
+        // Default max-track bounds depend on the virtual desktop. They can
+        // truncate a saved tall playlist when its thick frame is restored.
+        if (window == app->playlist) limits->ptMaxTrackSize = {S(2048),S(app->playlistShade ? 17 : 2048)};
         return 0;
     }
     case WM_LBUTTONDOWN:
@@ -912,6 +914,8 @@ int RunSmoke() {
     for (const int scale : {1,2}) {
         app->settings.scale = scale; app->settings.playerWidth = 487;
         UpdatePlaylistFonts(); ResizePlayer();
+        MINMAXINFO limits{}; SendMessageW(app->playlist,WM_GETMINMAXINFO,0,reinterpret_cast<LPARAM>(&limits));
+        if (limits.ptMaxTrackSize.x != S(2048) || limits.ptMaxTrackSize.y != S(2048)) return 49;
         RECT player{}, playlist{}, client{};
         GetWindowRect(app->player,&player); GetWindowRect(app->playlist,&playlist); GetClientRect(app->player,&client);
         if (client.right != S(487) || client.bottom != S(280) || playlist.left != player.left ||
@@ -941,7 +945,9 @@ int RunSmoke() {
         if (app->settings.playlistHeight != savedHeight) return 564;
         SendMessageW(app->playlist,WM_LBUTTONDOWN,MK_LBUTTON,MAKELPARAM(S(expected.shade.left + 3),S(expected.shade.top + 3)));
         GetClientRect(app->playlist,&client);
-        if (app->playlistShade || client.bottom != S(savedHeight) || (GetWindowLongPtrW(app->query,GWL_STYLE) & WS_VISIBLE) == 0) return 57;
+        if (app->playlistShade) return 571;
+        if (client.bottom != S(savedHeight)) return 572;
+        if ((GetWindowLongPtrW(app->query,GWL_STYLE) & WS_VISIBLE) == 0) return 573;
         app->tracks.clear(); RefreshPlaylist();
     }
     app->settings.scale = 1; ResizePlayer(); UpdatePlaylistFonts();
