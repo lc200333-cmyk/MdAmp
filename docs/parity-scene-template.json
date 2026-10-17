@@ -1,0 +1,44 @@
+{
+  "schema_version": 1,
+  "purpose": "Metadata template for one live image-pair acceptance case; not evidence of equivalence",
+  "reference": {
+    "product": "Winamp",
+    "version": "5.8.0.3660",
+    "executable_sha256": "bf895bdee6b4c6db180a9eee6b47e2cfbff40e8d1914d319d1efb67c95ce8f5b",
+    "skin": null,
+    "skin_manifest_sha256": null,
+    "theme": null,
+    "screenshot": null
+  },
+  "candidate": {
+    "product": "MdAmp",
+    "commit": null,
+    "executable_sha256": null,
+    "screenshot": null
+  },
+  "environment": {
+    "windows_build": null,
+    "language": null,
+    "system_dpi": null,
+    "display_scale": null,
+    "application_scale": null,
+    "client_width": null,
+    "client_height": null,
+    "font_rendering": null
+  },
+  "scene": {
+    "screen": null,
+    "state": null,
+    "media_fixture_sha256": null,
+    "playback_position": null,
+    "focus": null,
+    "selection": null,
+    "pointer_and_hover": null
+  },
+  "branding_and_dynamic_region_policy": "awaiting_owner_choice; no masks applied by comparator",
+  "capture_method": null,
+  "comparison_report": null,
+  "screenshot_provenance_verified": false,
+  "scene_visual_equivalence_verified": false,
+  "full_application_equivalence_verified": false
+}

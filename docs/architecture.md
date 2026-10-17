@@ -10,6 +10,7 @@ Winamp engine, DLL, XML, MAKI или оригинальные bitmap. Qt/Flutter
 | --- | --- |
 | `main.cpp` | Окна, меню/команды, контроллер плейлиста, события, настройки и DSP-host |
 | `modern_ui.*` | Собственная векторная отрисовка и общая карта hit-regions |
+| `playlist_ui.*` | Рамка/геометрия/карта footer-команд плейлиста; живые native Edit/ListView создаёт controller |
 | `audio_engine.*` | Декодирование через miniaudio, WASAPI, transport, спектр |
 | `equalizer.h` | Собственные stereo biquad filters и preamp |
 | `storage.*` | UTF-8 M3U/settings, clamping, bounded scan, атомарная замена файлов |

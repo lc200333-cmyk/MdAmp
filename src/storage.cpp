@@ -40,6 +40,9 @@ Settings Sanitize(Settings value) {
     value.repeat = std::clamp(value.repeat, -1, 1);
     value.theme = std::clamp(value.theme, 0, 5);
     value.scale = std::clamp(value.scale, 1, 4);
+    value.playerWidth = std::clamp(value.playerWidth, 354, 2048);
+    value.playlistWidth = std::clamp(value.playlistWidth, 354, 2048);
+    value.playlistHeight = std::clamp(value.playlistHeight, 164, 2048);
     value.x = std::clamp(value.x, -32000, 32000);
     value.y = std::clamp(value.y, -32000, 32000);
     return value;
@@ -179,6 +182,9 @@ Settings LoadSettings(const std::filesystem::path& path) {
         else if (key == "repeat") ParseNumber(value, settings.repeat);
         else if (key == "theme") ParseNumber(value, settings.theme);
         else if (key == "scale") ParseNumber(value, settings.scale);
+        else if (key == "playerWidth") ParseNumber(value, settings.playerWidth);
+        else if (key == "playlistWidth") ParseNumber(value, settings.playlistWidth);
+        else if (key == "playlistHeight") ParseNumber(value, settings.playlistHeight);
         else if (key == "x") ParseNumber(value, settings.x);
         else if (key == "y") ParseNumber(value, settings.y);
         else {
@@ -188,6 +194,7 @@ Settings LoadSettings(const std::filesystem::path& path) {
             else if (key == "alwaysOnTop" && ParseNumber(value, flag)) settings.alwaysOnTop = flag != 0;
             else if (key == "drawer" && ParseNumber(value, flag)) settings.drawer = flag != 0;
             else if (key == "playlistVisible" && ParseNumber(value, flag)) settings.playlistVisible = flag != 0;
+            else if (key == "playlistDocked" && ParseNumber(value, flag)) settings.playlistDocked = flag != 0;
             else if (key == "libraryVisible" && ParseNumber(value, flag)) settings.libraryVisible = flag != 0;
             else if (key.size() == 3 && key[0] == 'e' && key[1] == 'q' && key[2] >= '0' && key[2] <= '9')
                 ParseNumber(value, settings.eq[static_cast<std::size_t>(key[2] - '0')]);
@@ -205,7 +212,10 @@ bool SaveSettings(const std::filesystem::path& path, const Settings& settings,
         << "\npreamp=" << s.preamp << "\nstereoWidth=" << s.stereoWidth << "\neqEnabled=" << s.eqEnabled
         << "\nshuffle=" << s.shuffle << "\nalwaysOnTop=" << s.alwaysOnTop
         << "\nrepeat=" << s.repeat << "\ntheme=" << s.theme << "\nscale=" << s.scale
+        << "\nplayerWidth=" << s.playerWidth << "\nplaylistWidth=" << s.playlistWidth
+        << "\nplaylistHeight=" << s.playlistHeight
         << "\ndrawer=" << s.drawer << "\nplaylistVisible=" << s.playlistVisible
+        << "\nplaylistDocked=" << s.playlistDocked
         << "\nlibraryVisible=" << s.libraryVisible << "\nx=" << s.x << "\ny=" << s.y << '\n';
     for (std::size_t i = 0; i < s.eq.size(); ++i) out << "eq" << i << '=' << s.eq[i] << '\n';
     return AtomicWrite(path, out.str(), error);
@@ -223,28 +233,35 @@ std::vector<Track> LoadPlaylist(const std::filesystem::path& path, std::wstring&
     std::vector<Track> result;
     std::string line;
     std::wstring title;
+    int durationSeconds = -1;
     std::istringstream input(data);
     std::error_code ec;
     const auto absolutePlaylist = std::filesystem::absolute(path, ec);
     if (ec) { error = L"Cannot resolve the playlist directory."; return {}; }
     const auto directory = absolutePlaylist.parent_path();
     while (std::getline(input, line)) {
-        if (line.size() > 65536) { title.clear(); continue; }
+        if (line.size() > 65536) { title.clear(); durationSeconds = -1; continue; }
         line = Trim(line);
         if (line.empty()) continue;
         if (line.rfind("#EXTINF:", 0) == 0) {
             const auto comma = line.find(',');
             title = comma == std::string::npos ? L"" : Utf8ToWide(line.substr(comma + 1));
+            durationSeconds = -1;
+            int parsed = -1;
+            if (comma != std::string::npos && ParseNumber(line.substr(8, comma - 8), parsed) && parsed >= -1)
+                durationSeconds = parsed;
             continue;
         }
         if (line[0] == '#') continue;
         // This player only handles local files. Do not turn URLs into misleading local paths.
-        if (line.find("://") != std::string::npos) { title.clear(); continue; }
+        if (line.find("://") != std::string::npos) { title.clear(); durationSeconds = -1; continue; }
         std::filesystem::path media(Utf8ToWide(line));
         if (media.is_relative()) media = directory / media;
         auto track = MakeTrack(media);
         if (!title.empty()) track.title = title;
+        track.durationSeconds = durationSeconds;
         title.clear();
+        durationSeconds = -1;
         if (result.size() >= kMaxTracks) { error = L"Playlist was limited to 10000 tracks."; break; }
         result.push_back(std::move(track));
     }
@@ -271,7 +288,8 @@ bool SavePlaylist(const std::filesystem::path& path, const std::vector<Track>& t
             error = L"A playlist entry is not valid Unicode.";
             return false;
         }
-        data += "#EXTINF:-1," + encodedTitle + "\n" + encodedPath + "\n";
+        data += "#EXTINF:" + std::to_string((std::max)(-1, track.durationSeconds)) + "," +
+                encodedTitle + "\n" + encodedPath + "\n";
         if (data.size() > kMaxFileBytes) { error = L"Playlist exceeds the 16 MiB safety limit."; return false; }
     }
     return AtomicWrite(path, data, error);

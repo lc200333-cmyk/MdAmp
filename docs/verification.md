@@ -5,6 +5,19 @@ Windows SDK 10.0.26100.0. Исходный Winamp не изменялся.
 
 ## Автоматические проверки
 
+Обновление Modern по пользовательскому PNG: добавлен восьмой тест
+`mdamp.modern_layout` (bounds/hits, стабильность собственной отрисовки,
+смещение viewport, clipping и масштаб 100/200%). Расширен оконный smoke-test:
+поиск/колонка длительности, длинный список без горизонтальной прокрутки,
+shade обоих окон, масштаб отсоединённого shade и позиция медиатеки.
+Строгое сравнение синтетического превью **не пройдено**; это не live capture.
+Результаты и ограничения: `modern-reference-progress.md`.
+
+Текущий этап проверен и во временной копии, и в основной папке проекта:
+`build.bat` / `build.bat -Configuration Debug` — exit 0, **8/8 CTest** каждая.
+Аппаратный WASAPI smoke и controller integration в Release/Debug — exit 0.
+Пиксельная проверка эталона/синтетического превью — exit 1 (различаются).
+
 `build.bat` и `build.bat -Configuration Debug`: exit 0, по **6/6 CTest**:
 
 - `mdamp.unit`: формат времени и bounds layout;
@@ -38,6 +51,14 @@ $probe.ExitCode
 ```
 
 ## Runtime/UI
+
+Предыдущий этап 17 октября: в CMake добавлен независимый
+`MdAmpPixelDiff`, тогда Release и Debug проходили **7/7 CTest**, exit 0. Его
+15 synthetic self-checks проверяют PNG/WIC, SHA-256, alpha-only различия,
+размеры, метрики и отказ перезаписывать outputs. В первой CMake-сборке обнаружено
+повторное определение NOMINMAX; после #ifndef-guard обе сборки проходят /W4 /WX.
+Новые PNG не являются эталонами Winamp. GUI/плагины приложения этим дополнением
+не реализованы; после этого выполнен отдельный Modern-этап, описанный выше.
 
 Computer Use подтвердил запущенное новое окно, Playlist Editor, открытие
 Preferences через Ctrl+P и дерево восьми страниц. Захват screenshot снова

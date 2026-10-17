@@ -4,9 +4,11 @@
 #include <commdlg.h>
 #include <shellapi.h>
 #include <shlobj.h>
+#include <uxtheme.h>
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <climits>
 #include <cmath>
 #include <filesystem>
 #include <random>
@@ -15,6 +17,7 @@
 #include <vector>
 #include "audio_engine.h"
 #include "modern_ui.h"
+#include "playlist_ui.h"
 #include "storage.h"
 #include "presentation.h"
 #include "plugin_api.h"
@@ -26,7 +29,7 @@ enum Command : int {
     Preferences, PlaylistWindow, LibraryWindow, EqualizerWindow, VisualizationWindow,
     Shuffle, Repeat, AlwaysOnTop, Shade, ScaleOne, ScaleTwo, About, Remove, Clear,
     SelectAll, SortTitle, Reverse, Randomize, Jump, EqFlat, EqRock, EqPop, EqClassical,
-    EqDance, PluginConfig, FileInfo, PlaySelection, ThemeStart = 300,
+    EqDance, PluginConfig, FileInfo, PlaySelection, SelectNone, InvertSelection, ThemeStart = 300,
     Query = 500, TrackList, LibraryList, Tree, PrefApply, PrefClose,
     PrefTop, PrefTheme, PrefScale, PrefVolume, PrefPan, PrefEq, PrefPreamp,
     PrefStereo, PrefRepeat, PrefShuffle, PrefDrawer, PrefBand0 = 600
@@ -59,7 +62,8 @@ struct Application {
     HINSTANCE instance = nullptr;
     HWND player = nullptr, playlist = nullptr, library = nullptr, visualization = nullptr, prefs = nullptr;
     HWND list = nullptr, query = nullptr, libraryList = nullptr, prefTree = nullptr;
-    HFONT font = nullptr;
+    HFONT font = nullptr, playlistFont = nullptr, queryFont = nullptr;
+    HBRUSH playlistBrush = nullptr;
     mdamp::Settings settings;
     mdamp::PlayerView view;
     std::filesystem::path dataDirectory;
@@ -69,14 +73,19 @@ struct Application {
     std::vector<HWND> prefControls;
     int current = -1, prefPage = 0;
     bool smoke = false, shuttingDown = false, paused = false, moving = false;
-    bool attachedPlaylist = true, attachedLibrary = true, draggingSlider = false;
+    bool attachedPlaylist = true, attachedLibrary = true, draggingSlider = false, playlistShade = false;
     float stereoWidth = 0;
     mdamp::HitRegion dragRegion{};
     PluginHost plugin; // Reverse destruction order: engine is destroyed before DLL.
     mdamp::AudioEngine audio;
     std::mt19937 random{std::random_device{}()};
     std::wstring status = L"Ready";
-    ~Application() { if (font) DeleteObject(font); }
+    ~Application() {
+        if (font) DeleteObject(font);
+        if (playlistFont) DeleteObject(playlistFont);
+        if (queryFont) DeleteObject(queryFont);
+        if (playlistBrush) DeleteObject(playlistBrush);
+    }
 };
 Application* app = nullptr;
 LRESULT CALLBACK PlayerProcedure(HWND, UINT, WPARAM, LPARAM);
@@ -86,7 +95,22 @@ void Dispatch(int);
 void RefreshPlaylist();
 void RefreshPreferences();
 void PositionWindows();
+void LayoutAuxiliary(HWND);
 int S(int value) { return value * app->settings.scale; }
+int PlayerWidth() { return mdamp::PlayerLogicalWidth(app->settings.playerWidth); }
+int PlayerHeight() { return mdamp::PlayerLogicalHeight(app->view.shade, app->settings.drawer); }
+void UpdatePlaylistFonts() {
+    const auto makeFont = [](int height) {
+        return CreateFontW(-S(height),0,0,0,FW_NORMAL,FALSE,FALSE,FALSE,DEFAULT_CHARSET,
+            OUT_DEFAULT_PRECIS,CLIP_DEFAULT_PRECIS,CLEARTYPE_QUALITY,DEFAULT_PITCH,L"Tahoma");
+    };
+    const auto listFont = makeFont(20), queryFont = makeFont(13);
+    if (app->list) SendMessageW(app->list, WM_SETFONT, reinterpret_cast<WPARAM>(listFont), TRUE);
+    if (app->query) SendMessageW(app->query, WM_SETFONT, reinterpret_cast<WPARAM>(queryFont), TRUE);
+    if (app->playlistFont) DeleteObject(app->playlistFont);
+    if (app->queryFont) DeleteObject(app->queryFont);
+    app->playlistFont = listFont; app->queryFont = queryFont;
+}
 void Error(const std::wstring& message) {
     app->status = message;
     if (!app->smoke) MessageBoxW(app->prefs ? app->prefs : app->player, message.c_str(), L"MdAmp", MB_OK | MB_ICONWARNING);
@@ -112,7 +136,9 @@ void AddColumn(HWND list, int column, const wchar_t* title, int width) {
 }
 void ColorList(HWND list) {
     const auto palette = mdamp::ThemePalette(app->settings.theme);
-    ListView_SetBkColor(list, palette.panel); ListView_SetTextBkColor(list, palette.panel); ListView_SetTextColor(list, palette.text);
+    const auto background = list == app->list ? mdamp::PlaylistBackground(app->settings.theme) : palette.panel;
+    const auto text = list == app->list ? mdamp::PlaylistText(app->settings.theme) : palette.text;
+    ListView_SetBkColor(list, background); ListView_SetTextBkColor(list, background); ListView_SetTextColor(list, text);
     ListView_SetExtendedListViewStyle(list, LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER); InvalidateRect(list, nullptr, TRUE);
 }
 std::vector<int> SelectedTracks() {
@@ -128,14 +154,17 @@ void RefreshPlaylist() {
     for (std::size_t index = 0; index < app->tracks.size(); ++index) {
         const auto& track = app->tracks[index];
         if (!filter.empty() && Lower(track.title + L" " + track.path.wstring()).find(filter) == std::wstring::npos) continue;
-        const auto number = std::to_wstring(index + 1);
-        LVITEMW item{}; item.mask = LVIF_TEXT; item.iItem = static_cast<int>(app->visibleTracks.size()); item.pszText = const_cast<wchar_t*>(number.c_str());
+        const auto label = std::to_wstring(index + 1) + L". " + track.title;
+        LVITEMW item{}; item.mask = LVIF_TEXT; item.iItem = static_cast<int>(app->visibleTracks.size()); item.pszText = const_cast<wchar_t*>(label.c_str());
         const int row = ListView_InsertItem(app->list, &item);
-        ListView_SetItemText(app->list, row, 1, const_cast<wchar_t*>(track.title.c_str()));
+        const auto duration = track.durationSeconds >= 0 ? mdamp::FormatDuration(static_cast<std::uint64_t>(track.durationSeconds)) : L"";
+        ListView_SetItemText(app->list, row, 1, const_cast<wchar_t*>(duration.c_str()));
         app->visibleTracks.push_back(static_cast<int>(index));
         if (static_cast<int>(index) == app->current) ListView_SetItemState(app->list, row, LVIS_SELECTED | LVIS_FOCUSED, LVIS_SELECTED | LVIS_FOCUSED);
     }
-    SendMessageW(app->list, WM_SETREDRAW, TRUE, 0); InvalidateRect(app->list, nullptr, TRUE); InvalidateRect(app->playlist, nullptr, FALSE);
+    SendMessageW(app->list, WM_SETREDRAW, TRUE, 0);
+    LayoutAuxiliary(app->playlist); // Refit columns after a vertical scrollbar appears/disappears.
+    InvalidateRect(app->list, nullptr, TRUE); InvalidateRect(app->playlist, nullptr, FALSE);
 }
 void ApplyAudioSettings() {
     app->audio.SetVolume(app->settings.volume); app->audio.SetPan(app->settings.pan);
@@ -157,6 +186,8 @@ bool PlayAt(int index, bool showError = true) {
         app->paused = false; app->status = error; if (showError) Error(error); return false;
     }
     app->current = index; app->paused = false; ApplyAudioSettings();
+    const auto duration = app->audio.Snapshot().duration;
+    if (duration >= 0 && duration <= INT_MAX) app->tracks[static_cast<std::size_t>(index)].durationSeconds = static_cast<int>(duration);
     if (!app->audio.Play()) { if (showError) Error(L"Не удалось начать воспроизведение."); return false; }
     app->status = L"Playing";
     SetWindowTextW(app->player, (app->tracks[static_cast<std::size_t>(index)].title + L" — MdAmp").c_str());
@@ -235,19 +266,27 @@ void LoadLibraryFolder() {
 void PositionWindows() {
     if (!app->player || app->moving) return;
     RECT rect{}; GetWindowRect(app->player, &rect); app->moving = true;
-    if (app->playlist && app->attachedPlaylist) SetWindowPos(app->playlist, nullptr, rect.right, rect.top, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
-    if (app->library && app->attachedLibrary) SetWindowPos(app->library, nullptr, rect.left, rect.bottom, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+    if (app->playlist && app->attachedPlaylist) SetWindowPos(app->playlist, nullptr, rect.left, rect.bottom + S(1),
+        rect.right - rect.left, S(app->playlistShade ? 17 : app->settings.playlistHeight), SWP_NOZORDER | SWP_NOACTIVATE);
+    int libraryTop = rect.bottom + S(1);
+    if (app->settings.playlistVisible && app->attachedPlaylist) libraryTop += S(app->playlistShade ? 17 : app->settings.playlistHeight);
+    if (app->library && app->attachedLibrary) SetWindowPos(app->library, nullptr, rect.left, libraryTop, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
     app->moving = false;
 }
 void ResizePlayer() {
     app->view.drawer = app->settings.drawer;
+    const auto style = GetWindowLongPtrW(app->player,GWL_STYLE);
+    SetWindowLongPtrW(app->player,GWL_STYLE,app->view.shade ? style & ~static_cast<LONG_PTR>(WS_THICKFRAME) : style | WS_THICKFRAME);
     SetWindowPos(app->player, app->settings.alwaysOnTop ? HWND_TOPMOST : HWND_NOTOPMOST, 0, 0,
-        S(354), S(app->view.shade ? 25 : app->settings.drawer ? 280 : 164), SWP_NOMOVE | SWP_NOACTIVATE);
+        S(PlayerWidth()), S(PlayerHeight()), SWP_NOMOVE | SWP_NOACTIVATE | SWP_FRAMECHANGED);
     PositionWindows(); InvalidateRect(app->player, nullptr, FALSE);
 }
 void ThemeChanged() {
     app->settings.theme = std::clamp(app->settings.theme, 0, static_cast<int>(mdamp::ThemeNames().size()) - 1);
     ColorList(app->list); ColorList(app->libraryList);
+    if (app->playlistBrush) DeleteObject(app->playlistBrush);
+    app->playlistBrush = CreateSolidBrush(mdamp::PlaylistBackground(app->settings.theme));
+    if (app->query) InvalidateRect(app->query,nullptr,TRUE);
     for (const auto window : {app->player, app->playlist, app->library, app->visualization}) if (window) InvalidateRect(window, nullptr, TRUE);
 }
 void AddMenuItem(HMENU menu, int id, const wchar_t* text, bool checked = false) { AppendMenuW(menu, MF_STRING | (checked ? MF_CHECKED : 0), static_cast<UINT_PTR>(id), text); }
@@ -315,7 +354,7 @@ void Dispatch(int command) {
     case Stop: app->audio.Stop(); app->paused = false; app->status = L"Stopped"; break;
     case Prev: NextTrack(false, -1); break; case Next: NextTrack(false); break;
     case Preferences: ShowPreferences(); break;
-    case PlaylistWindow: app->settings.playlistVisible = !app->settings.playlistVisible; ShowWindow(app->playlist, app->settings.playlistVisible ? SW_SHOWNOACTIVATE : SW_HIDE); break;
+    case PlaylistWindow: app->settings.playlistVisible = !app->settings.playlistVisible; ShowWindow(app->playlist, app->settings.playlistVisible ? SW_SHOWNOACTIVATE : SW_HIDE); PositionWindows(); break;
     case LibraryWindow: app->settings.libraryVisible = !app->settings.libraryVisible; ShowWindow(app->library, app->settings.libraryVisible ? SW_SHOWNOACTIVATE : SW_HIDE); break;
     case EqualizerWindow: app->settings.drawer = !app->settings.drawer; app->view.tab = 0; ResizePlayer(); break;
     case VisualizationWindow: ShowWindow(app->visualization, IsWindowVisible(app->visualization) ? SW_HIDE : SW_SHOWNOACTIVATE); break;
@@ -325,18 +364,27 @@ void Dispatch(int command) {
     case Shade: app->view.shade = !app->view.shade; ResizePlayer(); break;
     case ScaleOne: case ScaleTwo:
         app->settings.scale = command == ScaleOne ? 1 : 2;
-        SetWindowPos(app->playlist,nullptr,0,0,S(436),S(280),SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+        app->moving = true;
+        SetWindowPos(app->playlist,nullptr,0,0,S(app->settings.playlistWidth),S(app->playlistShade ? 17 : app->settings.playlistHeight),SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
         SetWindowPos(app->library,nullptr,0,0,S(790),S(260),SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
         SetWindowPos(app->visualization,nullptr,0,0,S(354),S(200),SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
         MoveWindow(GetDlgItem(app->library,Folder),S(8),S(43),S(110),S(22),TRUE);
         MoveWindow(GetDlgItem(app->library,Add),S(126),S(43),S(145),S(22),TRUE);
-        ListView_SetColumnWidth(app->list,0,S(35)); ListView_SetColumnWidth(app->libraryList,0,S(280)); ListView_SetColumnWidth(app->libraryList,1,S(440));
+        UpdatePlaylistFonts(); LayoutAuxiliary(app->playlist);
+        ListView_SetColumnWidth(app->libraryList,0,S(280)); ListView_SetColumnWidth(app->libraryList,1,S(440));
+        app->moving = false;
         ResizePlayer(); break;
     case About: MessageBoxW(app->player, L"MdAmp " MDAMP_VERSION_W L"\n\nIndependent C++ / Win32 audio player.\nWAV / MP3 / FLAC, WASAPI, 10-band EQ, playlists, spectrum.\nOriginal code and vector UI; miniaudio under its upstream license.\n\nLegacy Winamp DLL / MAKI / AVS / MilkDrop compatibility is not implemented.", L"About MdAmp", MB_OK | MB_ICONINFORMATION); break;
     case Remove: { auto selected = SelectedTracks(); std::sort(selected.rbegin(), selected.rend());
         for (const auto index : selected) { if (index == app->current) { app->audio.Close(); app->paused = false; app->current = -1; } else if (index < app->current) --app->current; app->tracks.erase(app->tracks.begin() + index); } RefreshPlaylist(); break; }
     case Clear: app->audio.Close(); app->paused = false; app->tracks.clear(); app->current = -1; RefreshPlaylist(); break;
     case SelectAll: ListView_SetItemState(app->list, -1, LVIS_SELECTED, LVIS_SELECTED); break;
+    case SelectNone: ListView_SetItemState(app->list, -1, 0, LVIS_SELECTED); break;
+    case InvertSelection:
+        for (int i = 0; i < ListView_GetItemCount(app->list); ++i) {
+            const auto selected = ListView_GetItemState(app->list,i,LVIS_SELECTED);
+            ListView_SetItemState(app->list,i,selected ? 0 : LVIS_SELECTED,LVIS_SELECTED);
+        } break;
     case SortTitle: case Reverse: case Randomize: {
         std::vector<std::pair<mdamp::Track,int>> ordered;
         for (std::size_t i = 0; i < app->tracks.size(); ++i) ordered.emplace_back(app->tracks[i],static_cast<int>(i));
@@ -393,14 +441,16 @@ void UpdateSlider(POINT point) {
 void PaintPlayerWindow(HWND window) {
     PAINTSTRUCT paint{}; const auto dc = BeginPaint(window, &paint); RECT client{}; GetClientRect(window, &client);
     const auto memory = CreateCompatibleDC(dc); const auto bitmap = CreateCompatibleBitmap(dc, std::max(1L, client.right), std::max(1L, client.bottom)); const auto old = SelectObject(memory, bitmap);
-    SetMapMode(memory, MM_ANISOTROPIC); SetWindowExtEx(memory, 354, app->view.shade ? 25 : app->settings.drawer ? 280 : 164, nullptr); SetViewportExtEx(memory, client.right, client.bottom, nullptr);
+    app->view.width = std::max(354, static_cast<int>(client.right) / app->settings.scale);
+    SetMapMode(memory, MM_ANISOTROPIC); SetWindowExtEx(memory, 1, 1, nullptr); SetViewportExtEx(memory, app->settings.scale, app->settings.scale, nullptr);
     mdamp::PaintPlayer(memory, app->view); SetMapMode(memory, MM_TEXT);
     BitBlt(dc, 0, 0, client.right, client.bottom, memory, 0, 0, SRCCOPY);
     SelectObject(memory, old); DeleteObject(bitmap); DeleteDC(memory); EndPaint(window, &paint);
 }
 void UpdateView() {
     const auto audio = app->audio.Snapshot();
-    app->view.title = app->current >= 0 && static_cast<std::size_t>(app->current) < app->tracks.size() ? app->tracks[static_cast<std::size_t>(app->current)].title : L"MdAmp " MDAMP_VERSION_W;
+    app->view.title = app->current >= 0 && static_cast<std::size_t>(app->current) < app->tracks.size() ?
+        app->tracks[static_cast<std::size_t>(app->current)].title + L" (" + mdamp::FormatDuration(static_cast<std::uint64_t>(std::max(0.0,audio.duration))) + L")" : L"MdAmp " MDAMP_VERSION_W;
     app->view.info = audio.duration > 0 ? audio.format : app->status;
     app->view.time = mdamp::FormatDuration(static_cast<std::uint64_t>(std::max(0.0, audio.position)));
     app->view.playing = audio.playing; app->view.paused = app->paused;
@@ -408,28 +458,52 @@ void UpdateView() {
     app->view.volume = app->settings.volume; app->view.pan = app->settings.pan; app->view.eq = app->settings.eq; app->view.preamp = app->settings.preamp;
     app->view.eqEnabled = app->settings.eqEnabled; app->view.shuffle = app->settings.shuffle; app->view.repeat = app->settings.repeat;
     app->view.theme = app->settings.theme; app->view.drawer = app->settings.drawer; app->view.spectrum = audio.spectrum;
+    app->view.playlistVisible = app->settings.playlistVisible; app->view.libraryVisible = app->settings.libraryVisible;
     if (audio.ended && !app->paused) NextTrack(true);
     InvalidateRect(app->player, nullptr, FALSE); if (IsWindowVisible(app->visualization)) InvalidateRect(app->visualization, nullptr, FALSE);
+    if (IsWindowVisible(app->playlist)) { RECT client{}; GetClientRect(app->playlist, &client); client.top = client.bottom - S(24); InvalidateRect(app->playlist, &client, FALSE); }
 }
 LRESULT CALLBACK PlayerProcedure(HWND window, UINT message, WPARAM wParam, LPARAM lParam) {
     switch (message) {
+    case WM_NCCALCSIZE: return 0;
+    case WM_NCHITTEST: {
+        POINT point{GET_X_LPARAM(lParam),GET_Y_LPARAM(lParam)}; ScreenToClient(window,&point);
+        RECT bounds{}; GetClientRect(window,&bounds);
+        if (point.x < S(3)) return HTLEFT;
+        if (point.x >= bounds.right - S(3)) return HTRIGHT;
+        return HTCLIENT;
+    }
+    case WM_GETMINMAXINFO: {
+        auto* limits = reinterpret_cast<MINMAXINFO*>(lParam);
+        limits->ptMinTrackSize = {S(354),S(PlayerHeight())};
+        limits->ptMaxTrackSize = {S(2048),S(PlayerHeight())}; return 0;
+    }
+    case WM_SIZE: {
+        if (wParam != SIZE_MINIMIZED) { RECT client{}; GetClientRect(window,&client);
+            app->settings.playerWidth = std::clamp(static_cast<int>(client.right) / app->settings.scale,354,2048);
+            PositionWindows(); InvalidateRect(window,nullptr,FALSE); } return 0;
+    }
     case WM_PAINT: PaintPlayerWindow(window); return 0; case WM_ERASEBKGND: return 1;
     case WM_TIMER: UpdateView(); return 0;
     case WM_MOVE: if (!IsIconic(window)) { RECT rect{}; GetWindowRect(window, &rect); app->settings.x = rect.left; app->settings.y = rect.top; PositionWindows(); } return 0;
-    case WM_LBUTTONDBLCLK: if (!app->view.shade && GET_Y_LPARAM(lParam) < S(24) && GET_X_LPARAM(lParam) > S(80) && GET_X_LPARAM(lParam) < S(240)) Dispatch(Shade); return 0;
+    case WM_LBUTTONDBLCLK: if (GET_Y_LPARAM(lParam) < S(17) && GET_X_LPARAM(lParam) > S(40) && GET_X_LPARAM(lParam) < S(PlayerWidth() - 44)) Dispatch(Shade); return 0;
     case WM_LBUTTONDOWN: {
         POINT point{GET_X_LPARAM(lParam) / app->settings.scale, GET_Y_LPARAM(lParam) / app->settings.scale};
-        const auto regions = mdamp::PlayerHits(app->view.shade, app->settings.drawer, app->view.tab);
+        const auto regions = mdamp::PlayerHits(app->view.shade, app->settings.drawer, app->view.tab, PlayerWidth());
         for (const auto& region : regions) {
             if (!PtInRect(&region.rect, point)) continue;
             using A = mdamp::Action;
             if (region.action == A::Seek || region.action == A::Volume || region.action == A::Pan || region.action == A::Preamp || (region.action >= A::Band0 && region.action <= A::Band9)) { app->dragRegion = region; app->draggingSlider = true; SetCapture(window); UpdateSlider(point); }
             else HandleAction(region.action); return 0;
         }
-        if (!app->view.shade && point.y >= 25 && point.y < 40 && point.x < 230) {
-            POINT screen{GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)}; ClientToScreen(window, &screen);
-            Menu(point.x < 45 ? 0 : point.x < 83 ? 1 : point.x < 139 ? 2 : point.x < 181 ? 3 : 4, window, screen);
-        } else if (point.y < 25) SendMessageW(window, WM_NCLBUTTONDOWN, HTCAPTION, 0);
+        if (!app->view.shade) {
+            const auto menus = mdamp::PlayerMenuRects();
+            for (std::size_t i = 0; i < menus.size(); ++i) if (PtInRect(&menus[i],point)) {
+                POINT screen{S(menus[i].left),S(menus[i].bottom)}; ClientToScreen(window,&screen);
+                Menu(static_cast<int>(i),window,screen); return 0;
+            }
+        }
+        if (point.y < 17) SendMessageW(window, WM_NCLBUTTONDOWN, HTCAPTION, 0);
         return 0;
     }
     case WM_MOUSEMOVE: if (app->draggingSlider) UpdateSlider({GET_X_LPARAM(lParam) / app->settings.scale, GET_Y_LPARAM(lParam) / app->settings.scale}); return 0;
@@ -449,12 +523,62 @@ LRESULT CALLBACK PlayerProcedure(HWND window, UINT message, WPARAM wParam, LPARA
 void LayoutAuxiliary(HWND window) {
     RECT client{}; GetClientRect(window, &client); const int width = client.right, height = client.bottom;
     if (window == app->playlist) {
-        MoveWindow(app->query, S(7), S(43), std::max(10, width - S(14)), S(18), TRUE);
-        MoveWindow(app->list, S(6), S(65), std::max(10, width - S(12)), std::max(10, height - S(99)), TRUE);
-        const std::array<int, 7> ids{{Add, Folder, Remove, SelectAll, SortTitle, LoadList, SaveList}};
-        for (std::size_t i = 0; i < ids.size(); ++i) MoveWindow(GetDlgItem(window, ids[i]), S(6 + static_cast<int>(i) * 59), height - S(29), S(56), S(22), TRUE);
-        ListView_SetColumnWidth(app->list, 1, std::max(50, width - S(55)));
+        const auto layout = mdamp::ComputePlaylistLayout(width / app->settings.scale,height / app->settings.scale);
+        const auto move = [](HWND control, const RECT& rect) {
+            if (control) MoveWindow(control,S(rect.left),S(rect.top),S(rect.right-rect.left),S(rect.bottom-rect.top),TRUE);
+        };
+        move(app->query,layout.query); move(app->list,layout.list);
+        RECT listBounds{}; GetClientRect(app->list,&listBounds);
+        ListView_SetColumnWidth(app->list,0,std::max(1L,listBounds.right - S(64)));
+        ListView_SetColumnWidth(app->list,1,S(64));
     } else if (window == app->library) MoveWindow(app->libraryList, S(8), S(72), std::max(10, width - S(16)), std::max(10, height - S(80)), TRUE);
+}
+void PlaylistFooterMenu(mdamp::PlaylistFooterAction action, POINT position) {
+    const auto menu = CreatePopupMenu();
+    using A = mdamp::PlaylistFooterAction;
+    switch (action) {
+    case A::Add: AddMenuItem(menu,Add,L"Add file(s)...\tCtrl+L"); AddMenuItem(menu,Folder,L"Add folder..."); break;
+    case A::Remove: AddMenuItem(menu,Remove,L"Remove selected\tDelete"); AddMenuItem(menu,Clear,L"Clear playlist"); break;
+    case A::Select: AddMenuItem(menu,SelectAll,L"Select all\tCtrl+A"); AddMenuItem(menu,SelectNone,L"Select none"); AddMenuItem(menu,InvertSelection,L"Invert selection"); break;
+    case A::Misc: AddMenuItem(menu,SortTitle,L"Sort by title"); AddMenuItem(menu,Reverse,L"Reverse order"); AddMenuItem(menu,Randomize,L"Randomize order"); break;
+    case A::Manage: AddMenuItem(menu,LoadList,L"Load playlist...\tCtrl+Shift+O"); AddMenuItem(menu,SaveList,L"Save playlist...\tCtrl+S"); break;
+    default: DestroyMenu(menu); return;
+    }
+    const auto selected = TrackPopupMenu(menu,TPM_RETURNCMD | TPM_RIGHTBUTTON,position.x,position.y,0,app->playlist,nullptr);
+    DestroyMenu(menu); if (selected) Dispatch(static_cast<int>(selected));
+}
+LRESULT CALLBACK QueryProcedure(HWND window,UINT message,WPARAM wParam,LPARAM lParam,UINT_PTR,DWORD_PTR) {
+    const auto result = DefSubclassProc(window,message,wParam,lParam);
+    if (message == WM_PAINT && GetWindowTextLengthW(window) == 0 && GetFocus() != window) {
+        const auto dc = GetDC(window); RECT bounds{}; GetClientRect(window,&bounds);
+        const auto old = SelectObject(dc,app->queryFont); SetBkMode(dc,TRANSPARENT);
+        SetTextColor(dc,RGB(235,242,255));
+        DrawTextW(dc,L"Search in Playlist",-1,&bounds,DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX);
+        SelectObject(dc,old); ReleaseDC(window,dc);
+    }
+    if (message == WM_NCDESTROY) RemoveWindowSubclass(window,QueryProcedure,1);
+    return result;
+}
+void DrawPlaylistRow(const DRAWITEMSTRUCT& item) {
+    if (item.itemID >= app->visibleTracks.size()) return;
+    const int index = app->visibleTracks[item.itemID];
+    if (index < 0 || static_cast<std::size_t>(index) >= app->tracks.size()) return;
+    const auto& track = app->tracks[static_cast<std::size_t>(index)];
+    const auto dc = item.hDC; auto bounds = item.rcItem;
+    const bool focusedSelection = (item.itemState & ODS_SELECTED) != 0 && GetFocus() == app->list;
+    const auto brush = CreateSolidBrush(focusedSelection ? RGB(48,85,148) : mdamp::PlaylistBackground(app->settings.theme));
+    FillRect(dc,&bounds,brush); DeleteObject(brush);
+    const auto old = SelectObject(dc,app->playlistFont); SetBkMode(dc,TRANSPARENT); SetTextColor(dc,mdamp::PlaylistText(app->settings.theme));
+    auto titleBounds = bounds; titleBounds.right -= S(64); titleBounds.left += S(1);
+    const auto title = std::to_wstring(index + 1) + L". " + track.title;
+    DrawTextW(dc,title.c_str(),-1,&titleBounds,DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS | DT_NOPREFIX);
+    if (track.durationSeconds >= 0) {
+        auto durationBounds = bounds; durationBounds.left = titleBounds.right; durationBounds.right -= S(4);
+        const auto duration = mdamp::FormatDuration(static_cast<std::uint64_t>(track.durationSeconds));
+        DrawTextW(dc,duration.c_str(),-1,&durationBounds,DT_SINGLELINE | DT_VCENTER | DT_RIGHT | DT_NOPREFIX);
+    }
+    if ((item.itemState & ODS_FOCUS) != 0 && GetFocus() == app->list) DrawFocusRect(dc,&bounds);
+    SelectObject(dc,old);
 }
 void PlaylistContext(POINT point) {
     const auto menu = CreatePopupMenu(); AddMenuItem(menu, PlaySelection, L"Play selected\tEnter"); AddMenuItem(menu, Remove, L"Remove selected\tDelete"); AddMenuItem(menu, Clear, L"Clear playlist");
@@ -462,10 +586,10 @@ void PlaylistContext(POINT point) {
     const auto command = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON, point.x, point.y, 0, app->playlist, nullptr); DestroyMenu(menu); if (command) Dispatch(static_cast<int>(command));
 }
 void AuxiliaryMenu(HWND window,int x,POINT screen) {
-    if (window == app->playlist && x >= 50 && x < 115) { PlaylistContext(screen); return; }
-    if (window == app->playlist && x < 50) { Menu(0,window,screen); return; }
+    if (window == app->playlist && x >= 34 && x < 86) { PlaylistContext(screen); return; }
+    if (window == app->playlist && x < 34) { Menu(0,window,screen); return; }
     const auto menu = CreatePopupMenu();
-    if (window == app->playlist && x < 165) {
+    if (window == app->playlist && x < 118) {
         AddMenuItem(menu,SortTitle,L"Sort by title"); AddMenuItem(menu,Reverse,L"Reverse order"); AddMenuItem(menu,Randomize,L"Randomize order");
     } else if (window == app->library && x < 50) {
         AddMenuItem(menu,Folder,L"Scan music folder..."); AddMenuItem(menu,Add,L"Add library to playlist");
@@ -489,15 +613,25 @@ LRESULT CALLBACK AuxiliaryProcedure(HWND window, UINT message, WPARAM wParam, LP
         if (left) return HTLEFT; if (right) return HTRIGHT; if (top) return HTTOP; if (bottom) return HTBOTTOM;
         return HTCLIENT;
     }
-    case WM_NCCALCSIZE: if (wParam) return 0; break;
+    case WM_NCCALCSIZE: return 0;
     case WM_ERASEBKGND: return 1;
     case WM_PAINT: {
         PAINTSTRUCT paint{}; const auto dc = BeginPaint(window, &paint); RECT client{}; GetClientRect(window, &client);
         const auto palette = mdamp::ThemePalette(app->settings.theme); const auto brush = CreateSolidBrush(palette.background); FillRect(dc, &client, brush); DeleteObject(brush);
         const auto saved = SaveDC(dc); SetMapMode(dc, MM_ANISOTROPIC); SetWindowExtEx(dc, 1, 1, nullptr); SetViewportExtEx(dc, app->settings.scale, app->settings.scale, nullptr);
         RECT logical{0, 0, client.right / app->settings.scale, client.bottom / app->settings.scale};
-        mdamp::PaintFrame(dc, logical, window == app->playlist ? L"MdAmp Playlist Editor" : window == app->library ? L"MdAmp Media Library" : L"MdAmp Visualization", app->settings.theme);
-        if (window == app->playlist || window == app->library) {
+        if (window == app->playlist) {
+            const auto audio = app->audio.Snapshot();
+            const auto elapsed = mdamp::FormatDuration(static_cast<std::uint64_t>(std::max(0.0,audio.position)));
+            std::uint64_t totalSeconds = 0; bool allKnown = !app->tracks.empty();
+            for (const auto& track : app->tracks) {
+                if (track.durationSeconds < 0) allKnown = false;
+                else totalSeconds += static_cast<std::uint64_t>(track.durationSeconds);
+            }
+            const auto total = allKnown ? mdamp::FormatDuration(totalSeconds) : L"--:--";
+            mdamp::PaintPlaylistChrome(dc,logical.right,app->playlistShade ? 164 : logical.bottom,app->settings.theme,elapsed + L"/" + total);
+        } else mdamp::PaintFrame(dc, logical, window == app->library ? L"MdAmp Media Library" : L"MdAmp Visualization", app->settings.theme);
+        if (window == app->library) {
             const auto font = CreateFontW(-9,0,0,0,FW_NORMAL,FALSE,FALSE,FALSE,DEFAULT_CHARSET,OUT_DEFAULT_PRECIS,CLIP_DEFAULT_PRECIS,CLEARTYPE_QUALITY,DEFAULT_PITCH,L"Tahoma");
             const auto previous = SelectObject(dc,font); SetBkMode(dc,TRANSPARENT); SetTextColor(dc,palette.text);
             TextOutW(dc,8,28,L"File",4);
@@ -517,14 +651,65 @@ LRESULT CALLBACK AuxiliaryProcedure(HWND window, UINT message, WPARAM wParam, LP
         }
         EndPaint(window, &paint); return 0;
     }
-    case WM_SIZE: LayoutAuxiliary(window); return 0;
-    case WM_MOVE: if (!app->moving) { if (window == app->playlist) app->attachedPlaylist = false; if (window == app->library) app->attachedLibrary = false; } return 0;
-    case WM_GETMINMAXINFO: { auto* limits = reinterpret_cast<MINMAXINFO*>(lParam); limits->ptMinTrackSize = {S(354), S(164)}; return 0; }
+    case WM_SIZE:
+        if (window == app->playlist && wParam != SIZE_MINIMIZED) {
+            RECT client{}; GetClientRect(window,&client);
+            app->settings.playlistWidth = std::clamp(static_cast<int>(client.right) / app->settings.scale,354,2048);
+            if (!app->playlistShade) app->settings.playlistHeight = std::clamp(static_cast<int>(client.bottom) / app->settings.scale,164,2048);
+        }
+        LayoutAuxiliary(window);
+        if (window == app->playlist) PositionWindows();
+        return 0;
+    case WM_MOVE: if (!app->moving) { if (window == app->playlist) { app->attachedPlaylist = false; app->settings.playlistDocked = false; } if (window == app->library) app->attachedLibrary = false; } return 0;
+    case WM_GETMINMAXINFO: {
+        auto* limits = reinterpret_cast<MINMAXINFO*>(lParam);
+        limits->ptMinTrackSize = {S(354), S(window == app->playlist && app->playlistShade ? 17 : 164)};
+        if (window == app->playlist && app->playlistShade) limits->ptMaxTrackSize.y = S(17);
+        return 0;
+    }
     case WM_LBUTTONDOWN:
-        if (GET_Y_LPARAM(lParam) >= S(25) && GET_Y_LPARAM(lParam) < S(40) && window != app->visualization) {
+        if (window == app->playlist) {
+            RECT client{}; GetClientRect(window,&client);
+            POINT point{GET_X_LPARAM(lParam) / app->settings.scale,GET_Y_LPARAM(lParam) / app->settings.scale};
+            const int width = client.right / app->settings.scale, height = client.bottom / app->settings.scale;
+            const auto layout = mdamp::ComputePlaylistLayout(width,height);
+            if (PtInRect(&layout.close,point)) { SendMessageW(window,WM_CLOSE,0,0); return 0; }
+            if (PtInRect(&layout.shade,point)) {
+                app->playlistShade = !app->playlistShade;
+                ShowWindow(app->query,app->playlistShade ? SW_HIDE : SW_SHOWNA); ShowWindow(app->list,app->playlistShade ? SW_HIDE : SW_SHOWNA);
+                const auto style = GetWindowLongPtrW(window,GWL_STYLE);
+                SetWindowLongPtrW(window,GWL_STYLE,app->playlistShade ? style & ~static_cast<LONG_PTR>(WS_THICKFRAME) : style | WS_THICKFRAME);
+                app->moving = true;
+                SetWindowPos(window,nullptr,0,0,client.right,S(app->playlistShade ? 17 : app->settings.playlistHeight),SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
+                app->moving = false;
+                PositionWindows(); return 0;
+            }
+            if (!app->playlistShade) {
+                const auto action = mdamp::PlaylistFooterHit(point.x,point.y,width,height);
+                if (action != mdamp::PlaylistFooterAction::None) {
+                    POINT screen{GET_X_LPARAM(lParam),GET_Y_LPARAM(lParam)}; ClientToScreen(window,&screen);
+                    PlaylistFooterMenu(action,screen); return 0;
+                }
+                if (point.y >= 17 && point.y < 33) {
+                    POINT screen{GET_X_LPARAM(lParam),S(33)}; ClientToScreen(window,&screen);
+                    AuxiliaryMenu(window,point.x,screen); return 0;
+                }
+                if (point.x >= width - 31 && point.y >= 39 && point.y < 66) { SetFocus(app->query); return 0; }
+            }
+            if (point.y < 17) SendMessageW(window,WM_NCLBUTTONDOWN,HTCAPTION,0);
+            return 0;
+        }
+        if (GET_Y_LPARAM(lParam) >= S(17) && GET_Y_LPARAM(lParam) < S(33) && window != app->visualization) {
             POINT point{GET_X_LPARAM(lParam),GET_Y_LPARAM(lParam)}; ClientToScreen(window,&point); AuxiliaryMenu(window,GET_X_LPARAM(lParam) / app->settings.scale,point); return 0;
         }
-        if (GET_Y_LPARAM(lParam) < S(23)) { RECT client{}; GetClientRect(window, &client); if (GET_X_LPARAM(lParam) > client.right - S(22)) SendMessageW(window, WM_CLOSE, 0, 0); else SendMessageW(window, WM_NCLBUTTONDOWN, HTCAPTION, 0); } return 0;
+        if (GET_Y_LPARAM(lParam) < S(17)) { RECT client{}; GetClientRect(window, &client); if (GET_X_LPARAM(lParam) > client.right - S(22)) SendMessageW(window, WM_CLOSE, 0, 0); else SendMessageW(window, WM_NCLBUTTONDOWN, HTCAPTION, 0); } return 0;
+    case WM_DRAWITEM:
+        if (wParam == TrackList) { DrawPlaylistRow(*reinterpret_cast<const DRAWITEMSTRUCT*>(lParam)); return TRUE; } break;
+    case WM_CTLCOLOREDIT:
+        if (reinterpret_cast<HWND>(lParam) == app->query) {
+            const auto dc = reinterpret_cast<HDC>(wParam); SetTextColor(dc,mdamp::PlaylistText(app->settings.theme)); SetBkColor(dc,mdamp::PlaylistBackground(app->settings.theme));
+            return reinterpret_cast<LRESULT>(app->playlistBrush);
+        } break;
     case WM_COMMAND:
         if (LOWORD(wParam) == Query && HIWORD(wParam) == EN_CHANGE) RefreshPlaylist();
         else if (window == app->library && LOWORD(wParam) == Folder) LoadLibraryFolder();
@@ -544,7 +729,7 @@ LRESULT CALLBACK AuxiliaryProcedure(HWND window, UINT message, WPARAM wParam, LP
         return 0;
     }
     case WM_CONTEXTMENU: if (window == app->playlist) { POINT point{GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)}; if (point.x == -1) GetCursorPos(&point); PlaylistContext(point); } return 0;
-    case WM_CLOSE: ShowWindow(window, SW_HIDE); if (window == app->playlist) app->settings.playlistVisible = false; if (window == app->library) app->settings.libraryVisible = false; return 0;
+    case WM_CLOSE: ShowWindow(window, SW_HIDE); if (window == app->playlist) { app->settings.playlistVisible = false; PositionWindows(); } if (window == app->library) app->settings.libraryVisible = false; return 0;
     }
     return DefWindowProcW(window, message, wParam, lParam);
 }
@@ -664,10 +849,10 @@ bool HandleKey(const MSG& message) {
         if ((root == app->playlist && (key == 'F' || key == 'P' || key == 'S' || key == 'H')) ||
             (root == app->library && (key == 'F' || key == 'I' || key == 'H'))) {
             RECT rect{}; GetWindowRect(root,&rect);
-            AuxiliaryMenu(root,key == 'F' ? 8 : key == 'P' || key == 'I' ? 54 : key == 'S' ? 119 : 170,{rect.left + S(8),rect.top + S(40)}); return true;
+            AuxiliaryMenu(root,key == 'F' ? 8 : key == 'P' || key == 'I' ? 54 : key == 'S' ? 92 : 125,{rect.left + S(8),rect.top + S(33)}); return true;
         }
         if (key == 'E') command = PlaylistWindow; else if (key == 'G') command = EqualizerWindow; else if (key == 'L') command = LibraryWindow; else if (key == '3') command = FileInfo;
-        else if (key == 'F' || key == 'P' || key == 'O' || key == 'I' || key == 'H') { RECT rect{}; GetWindowRect(app->player, &rect); Menu(key == 'F' ? 0 : key == 'P' ? 1 : key == 'O' ? 2 : key == 'I' ? 3 : 4, app->player, {rect.left + S(8), rect.top + S(40)}); return true; }
+        else if (key == 'F' || key == 'P' || key == 'O' || key == 'I' || key == 'H') { RECT rect{}; GetWindowRect(app->player, &rect); Menu(key == 'F' ? 0 : key == 'P' ? 1 : key == 'O' ? 2 : key == 'I' ? 3 : 4, app->player, {rect.left + S(8), rect.top + S(33)}); return true; }
     } else if (!editing) {
         switch (key) {
         case 'Z': command = Prev; break; case 'X': command = Play; break; case 'C': command = Pause; break; case 'V': command = Stop; break; case 'B': command = Next; break; case VK_SPACE: command = Pause; break;
@@ -692,20 +877,21 @@ bool RegisterClasses() {
 }
 bool CreateWindows() {
     app->font = CreateFontW(-14,0,0,0,FW_NORMAL,FALSE,FALSE,FALSE,DEFAULT_CHARSET,OUT_DEFAULT_PRECIS,CLIP_DEFAULT_PRECIS,CLEARTYPE_QUALITY,DEFAULT_PITCH,L"Tahoma");
-    app->player = CreateWindowExW(WS_EX_APPWINDOW | WS_EX_ACCEPTFILES, kPlayerClass, L"MdAmp " MDAMP_VERSION_W, WS_POPUP | WS_MINIMIZEBOX,
-        app->settings.x, app->settings.y, S(354), S(app->settings.drawer ? 280 : 164), nullptr, nullptr, app->instance, nullptr);
+    app->player = CreateWindowExW(WS_EX_APPWINDOW | WS_EX_ACCEPTFILES, kPlayerClass, L"MdAmp " MDAMP_VERSION_W, WS_POPUP | WS_MINIMIZEBOX | WS_THICKFRAME,
+        app->settings.x, app->settings.y, S(PlayerWidth()), S(PlayerHeight()), nullptr, nullptr, app->instance, nullptr);
     if (!app->player) return false;
     app->moving = true;
-    app->playlist = CreateWindowExW(WS_EX_TOOLWINDOW,kPlaylistClass,L"MdAmp Playlist Editor",WS_POPUP | WS_THICKFRAME,app->settings.x + S(354),app->settings.y,S(436),S(280),app->player,nullptr,app->instance,nullptr);
-    app->library = CreateWindowExW(WS_EX_TOOLWINDOW,kLibraryClass,L"MdAmp Media Library",WS_POPUP | WS_THICKFRAME,app->settings.x,app->settings.y + S(app->settings.drawer ? 280 : 164),S(790),S(260),app->player,nullptr,app->instance,nullptr);
+    app->playlist = CreateWindowExW(WS_EX_TOOLWINDOW,kPlaylistClass,L"MdAmp Playlist Editor",WS_POPUP | WS_THICKFRAME | WS_CLIPCHILDREN,app->settings.x,app->settings.y + S(PlayerHeight() + 1),S(app->attachedPlaylist ? PlayerWidth() : app->settings.playlistWidth),S(app->settings.playlistHeight),app->player,nullptr,app->instance,nullptr);
+    app->library = CreateWindowExW(WS_EX_TOOLWINDOW,kLibraryClass,L"MdAmp Media Library",WS_POPUP | WS_THICKFRAME | WS_CLIPCHILDREN,app->settings.x,app->settings.y + S(PlayerHeight() + app->settings.playlistHeight + 1),S(790),S(260),app->player,nullptr,app->instance,nullptr);
     app->visualization = CreateWindowExW(WS_EX_TOOLWINDOW,kVisClass,L"MdAmp Visualization",WS_POPUP | WS_THICKFRAME,app->settings.x + 80,app->settings.y + 80,S(354),S(200),app->player,nullptr,app->instance,nullptr);
     app->moving = false; if (!app->playlist || !app->library || !app->visualization) return false;
-    app->query = Control(app->playlist,L"EDIT",L"",Query,S(7),S(26),S(420),S(20),ES_AUTOHSCROLL | WS_TABSTOP,WS_EX_CLIENTEDGE);
-    SendMessageW(app->query, EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(L"Search playlist — J"));
-    app->list = Control(app->playlist,WC_LISTVIEWW,L"Playlist",TrackList,S(6),S(49),S(424),S(198),LVS_REPORT | LVS_NOCOLUMNHEADER | WS_TABSTOP);
-    AddColumn(app->list,0,L"#",S(35)); AddColumn(app->list,1,L"Title",S(370));
-    const std::array<std::pair<int,const wchar_t*>,7> buttons{{{Add,L"+ File"},{Folder,L"+ Dir"},{Remove,L"Remove"},{SelectAll,L"Select"},{SortTitle,L"Sort"},{LoadList,L"Load"},{SaveList,L"Save"}}};
-    for (const auto& button : buttons) Control(app->playlist,L"BUTTON",button.second,button.first,0,0,S(56),S(22),WS_TABSTOP);
+    app->query = Control(app->playlist,L"EDIT",L"",Query,S(10),S(43),S(400),S(20),ES_AUTOHSCROLL | WS_TABSTOP);
+    SetWindowSubclass(app->query,QueryProcedure,1,0);
+    app->playlistBrush = CreateSolidBrush(mdamp::PlaylistBackground());
+    app->list = Control(app->playlist,WC_LISTVIEWW,L"Playlist",TrackList,S(7),S(66),S(420),S(198),LVS_REPORT | LVS_NOCOLUMNHEADER | LVS_OWNERDRAWFIXED | WS_TABSTOP);
+    SetWindowTheme(app->list,L"",L"");
+    AddColumn(app->list,0,L"Title",S(360)); AddColumn(app->list,1,L"Time",S(64));
+    UpdatePlaylistFonts();
     Control(app->library,L"BUTTON",L"Open folder",Folder,S(8),S(43),S(110),S(22),WS_TABSTOP);
     Control(app->library,L"BUTTON",L"Add all to playlist",Add,S(126),S(43),S(145),S(22),WS_TABSTOP);
     app->libraryList = Control(app->library,WC_LISTVIEWW,L"Media Library",LibraryList,S(8),S(54),S(770),S(195),LVS_REPORT | WS_TABSTOP);
@@ -721,6 +907,60 @@ int RunSmoke() {
         if (region.rect.right <= region.rect.left || region.rect.bottom <= region.rect.top) return 11;
     }
     if (!play || !seek || !volume || !eq) return 12;
+    // Exercise live native child geometry and controller search without touching
+    // application data or opening an audio device. These are not pixel goldens.
+    for (const int scale : {1,2}) {
+        app->settings.scale = scale; app->settings.playerWidth = 487;
+        UpdatePlaylistFonts(); ResizePlayer();
+        RECT player{}, playlist{}, client{};
+        GetWindowRect(app->player,&player); GetWindowRect(app->playlist,&playlist); GetClientRect(app->player,&client);
+        if (client.right != S(487) || client.bottom != S(280) || playlist.left != player.left ||
+            playlist.top != player.bottom + S(1) || playlist.right - playlist.left != S(487)) return 50;
+        auto first = mdamp::MakeTrack(L"synthetic-one.wav"), second = mdamp::MakeTrack(L"synthetic-two.wav");
+        first.title = L"needle"; first.durationSeconds = 125; second.title = L"other";
+        app->tracks = {first,second}; RefreshPlaylist();
+        wchar_t duration[32]{}; ListView_GetItemText(app->list,0,1,duration,32);
+        if (std::wstring(duration) != L"2:05" || ListView_GetItemCount(app->list) != 2) return 51;
+        SetWindowTextW(app->query,L"needle");
+        if (ListView_GetItemCount(app->list) != 1 || app->visibleTracks[0] != 0) return 52;
+        SetWindowTextW(app->query,L"");
+        if (ListView_GetItemCount(app->list) != 2) return 53;
+        app->tracks.assign(200,first); RefreshPlaylist();
+        GetClientRect(app->list,&client);
+        if (ListView_GetColumnWidth(app->list,0) + ListView_GetColumnWidth(app->list,1) > client.right) return 54;
+        if ((GetWindowLongPtrW(app->list,GWL_STYLE) & WS_HSCROLL) != 0) return 541;
+        const auto expected = mdamp::ComputePlaylistLayout(487,app->settings.playlistHeight);
+        GetWindowRect(app->query,&client); MapWindowPoints(nullptr,app->playlist,reinterpret_cast<POINT*>(&client),2);
+        if (client.left != S(expected.query.left) || client.top != S(expected.query.top) || client.right != S(expected.query.right)) return 55;
+        const int savedHeight = app->settings.playlistHeight;
+        SendMessageW(app->playlist,WM_LBUTTONDOWN,MK_LBUTTON,MAKELPARAM(S(expected.shade.left + 3),S(expected.shade.top + 3)));
+        GetClientRect(app->playlist,&client);
+        if (!app->playlistShade) return 561;
+        if (client.bottom != S(17)) return 562;
+        if ((GetWindowLongPtrW(app->query,GWL_STYLE) & WS_VISIBLE) != 0) return 563;
+        if (app->settings.playlistHeight != savedHeight) return 564;
+        SendMessageW(app->playlist,WM_LBUTTONDOWN,MK_LBUTTON,MAKELPARAM(S(expected.shade.left + 3),S(expected.shade.top + 3)));
+        GetClientRect(app->playlist,&client);
+        if (app->playlistShade || client.bottom != S(savedHeight) || (GetWindowLongPtrW(app->query,GWL_STYLE) & WS_VISIBLE) == 0) return 57;
+        app->tracks.clear(); RefreshPlaylist();
+    }
+    app->settings.scale = 1; ResizePlayer(); UpdatePlaylistFonts();
+    Dispatch(Shade); RECT shaded{}; GetClientRect(app->player,&shaded);
+    if (shaded.bottom != 17) return 58;
+    Dispatch(Shade);
+    const auto shade = mdamp::ComputePlaylistLayout(487,app->settings.playlistHeight).shade;
+    SendMessageW(app->playlist,WM_LBUTTONDOWN,MK_LBUTTON,MAKELPARAM(shade.left + 3,shade.top + 3));
+    app->attachedPlaylist = false; app->settings.playlistDocked = false;
+    const auto savedHeight = app->settings.playlistHeight;
+    Dispatch(ScaleTwo); GetClientRect(app->playlist,&shaded);
+    if (!app->playlistShade || shaded.bottom != S(17) || app->settings.playlistHeight != savedHeight || app->attachedPlaylist) return 59;
+    Dispatch(ScaleOne);
+    SendMessageW(app->playlist,WM_LBUTTONDOWN,MK_LBUTTON,MAKELPARAM(shade.left + 3,shade.top + 3));
+    app->attachedPlaylist = true; app->settings.playlistDocked = true;
+    SetWindowPos(app->playlist,nullptr,0,0,487,500,SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+    RECT playlist{}, library{}; GetWindowRect(app->playlist,&playlist); GetWindowRect(app->library,&library);
+    if (library.top != playlist.bottom || app->settings.playlistHeight != 500) return 60;
+    app->settings.playlistHeight = savedHeight; ResizePlayer();
     ShowPreferences(); if (!app->prefs || !app->prefTree) return 13;
     for (int page = 0; page < 8; ++page) { app->prefPage = page; RefreshPreferences(); if (app->prefControls.empty()) return 14; }
     DestroyWindow(app->prefs);
@@ -790,6 +1030,7 @@ int WINAPI wWinMain(HINSTANCE instance,HINSTANCE,PWSTR,int show) {
         }
     }
     app->stereoWidth = app->settings.stereoWidth;
+    app->attachedPlaylist = app->settings.playlistDocked;
     app->settings.scale = std::clamp(app->settings.scale,1,2);
     if (!RegisterClasses() || !CreateWindows()) { if (SUCCEEDED(com)) CoUninitialize(); return 2; }
     int result = 0;

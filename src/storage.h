@@ -9,14 +9,17 @@ namespace mdamp {
 struct Track {
     std::filesystem::path path;
     std::wstring title;
+    int durationSeconds = -1; // -1 means unknown; zero is a known empty duration.
 };
 struct Settings {
     float volume = .75f, pan = 0, preamp = 0;
     float stereoWidth = 0;
     std::array<float, 10> eq{};
     bool eqEnabled = false, shuffle = false, alwaysOnTop = false;
-    int repeat = 0, theme = 0, scale = 2;
+    int repeat = 0, theme = 0, scale = 1;
+    int playerWidth = 487, playlistWidth = 487, playlistHeight = 976;
     bool drawer = true, playlistVisible = true, libraryVisible = false;
+    bool playlistDocked = true;
     int x = 80, y = 80;
 };
 std::filesystem::path DefaultDataDirectory();

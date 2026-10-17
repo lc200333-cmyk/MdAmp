@@ -18,11 +18,13 @@ control flow. Those are not claimed reproduced here.
 
 ## Newly implemented geometry
 
-The main coordinate system is 354 x 164 collapsed, 354 x 280 expanded, and
-354 x 25 shaded. The application scales this logical space for DPI/user zoom.
+Following the owner-supplied PNG, the main window now defaults to 487 logical
+pixels wide, resizable horizontally with a minimum of 354. Its heights are
+164 collapsed, 280 expanded and 17 shaded. The 320-wide EQ panel stays centered
+instead of stretching the whole drawing. The application supports 100/200% zoom.
 All pointer hit rectangles come from `PlayerHits`; painting and hit-testing
 share the same geometry. The titlebar is custom-drawn with minimize, shade
-and close controls. A five-entry menu row occupies y=25..39, leaving the
+and close controls. A five-entry menu row occupies y=17..33, leaving the
 application responsible for actual menu dispatch and keyboard navigation.
 
 The song display has a large elapsed-time field, title, stream information,
@@ -37,10 +39,9 @@ The EQ drawer exposes balance, preamp and frequencies 60, 170, 310, 600, 1k,
 3k, 6k, 12k, 14k and 16k Hz, matching MdAmp's actual DSP filter centers.
 The gain range is -12..+12 dB. Actual
 processing is performed by MdAmp's audio engine rather than the renderer.
-The renderer emits commands for enable, flat reset and presets. The internal
-`EqAuto` action name is retained for the host interface, but its visible label
-is FLAT and the host resets the bands; this is not Winamp's per-track automatic
-preset behavior. A drawn control alone is not proof of audio integration.
+The renderer emits commands for enable and presets. AUTO is explicitly disabled.
+The internal `EqAuto` action remains the Flat EQ shortcut in Options, not
+Winamp's per-track automatic presets. A drawn control alone is not audio proof.
 
 Options contains real application command targets for Preferences, Playlist,
 Shuffle and Repeat rather than pretending all legacy drawer settings work.
@@ -62,9 +63,11 @@ legacy options subpages. It is not a Winamp XML/WSZ/WAL skin interpreter.
 Third-party skins and visualization plug-ins require separate compatibility
 work and cannot be inferred from similarity of the main window.
 
-No live pixel-comparison claim is made: the original investigation's desktop
-capture timed out. A build test and logical hit-map checks do not replace
-visual inspection, keyboard/accessibility testing or audio integration tests.
+No live pixel-comparison claim is made: selected-window capture still times out.
+The owner supplied a lossless PNG. Strict comparison against our synthetic
+production-renderer preview fails; see `modern-reference-progress.md`. There
+are no branding, desktop, clock or other pixel exclusions. A build test and
+logical hit-map checks do not replace live visual/accessibility verification.
 
 ## Major-screen parity matrix
 
@@ -79,17 +82,17 @@ reports; behaviors below are checked against MdAmp's current source.
 | --- | --- | --- |
 | Modern main player | Partial | Custom silver/blue compact player, seek, volume, transport, title/time/status, live spectrum; not sprite-identical. |
 | Main File/Play/Options/View/Help | Partial | Real native popup commands, themes and checked states; original dynamic plug-in menu registry absent. |
-| Windowshade | Partial | 354 x 25 transport/title/volume/chrome; no expandable shade groups, separate shade seek, library/playlist buttons or theme slots. |
+| Windowshade | Partial | Resizable-width x 17 transport/title/volume/chrome; no expandable shade groups, separate shade seek, library/playlist buttons or theme slots. |
 | Equalizer drawer | Partial | Audible ten-band EQ, preamp, balance, enable, five newly defined presets; FLAT resets rather than automatic per-track presets. |
 | Crossfade drawer controls | Absent | No track crossfade, crossfade time slider or increment/decrement buttons. |
 | Options drawer | Partial | Preferences, playlist, shuffle and repeat shortcuts; not the seven original drawer subpages. |
 | Options Drawers/Menus/Windowshade/Vis Button | Absent | No MAKI drawer animation preferences, menu visibility buckets, shade linkage policy or context/config selection setting. |
 | Options Notifications/Songticker/Misc | Absent | No notification timings, marquee modes, detach-video settings or beat overlay toggles. |
 | Color Themes drawer | Partial | Six original palettes with previous/next/select and menu selection; not 44 gamma presets. |
-| Playlist Editor | Partial | Separate window, query, numbered titles, selection, play, append/remove/clear, ordering, UTF-8 M3U import/export; native system controls rather than original skin widgets. |
-| Playlist windowshade | Absent | Only main player supports shade. |
+| Playlist Editor | Partial | Below-player docking, query, numbered titles and known durations, selection, play, append/remove/clear, ordering, UTF-8 M3U import/export; native Edit/ListView rather than original skin widgets. Unknown durations stay blank until known from EXTINF or playback. |
+| Playlist windowshade | Partial | Working 17-pixel shade with child controls hidden; independent scaling preserves collapsed height. Original expandable shade groups remain absent. |
 | Playlist search and Jump to File | Partial | J focuses live title/path filtering; no separate search-results popup, history, 500-result policy or advanced move-selection actions. |
-| Playlist footer and context menus | Partial | File/directory append, select, sort, remove, load/save and context ordering; no original full File/Playlist/Sort/Help menu set. |
+| Playlist footer and context menus | Partial | Own oval Add/Rem/Sel/Misc/Manage controls with real popup commands, selection invert/clear, file/directory append, sorting and M3U load/save; not the full original menu set. |
 | Media Library host | Partial | Separate folder scan and title/path list, play by double-click and append all; no original left navigation/filter host. |
 | Local Media/smart views | Partial | WAV/MP3/FLAC folder scan only; no persistent indexed database, tag-column filters or smart-query editor. |
 | Saved playlists / import-export manager | Partial | Session playlist plus user-chosen M3U files; no saved-playlist library, PLS, or named-playlist management screen. |
