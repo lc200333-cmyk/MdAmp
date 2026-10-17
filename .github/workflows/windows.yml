@@ -1,0 +1,81 @@
+name: Windows build and version
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mdamp-windows-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  version:
+    if: github.event_name == 'push' && github.actor != 'github-actions[bot]'
+    runs-on: windows-2022
+    permissions:
+      contents: write
+    outputs:
+      commit: ${{ steps.bump.outputs.commit }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.ref_name }}
+      - name: Increment version without overwriting newer commits
+        id: bump
+        shell: pwsh
+        env:
+          MDAMP_BRANCH: ${{ github.ref_name }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          git fetch origin $env:MDAMP_BRANCH
+          if ($LASTEXITCODE) { throw 'Fetch failed' }
+          git merge --ff-only "origin/$env:MDAMP_BRANCH"
+          if ($LASTEXITCODE) { throw 'Branch diverged; refusing to overwrite history' }
+          $version = ./tools/version.ps1 -Increment
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -- VERSION
+          git commit -m "chore: version $version [skip ci]"
+          if ($LASTEXITCODE) { throw 'Version commit failed' }
+          git push origin "HEAD:refs/heads/$env:MDAMP_BRANCH"
+          if ($LASTEXITCODE) { throw 'Remote advanced; refusing force push' }
+          "commit=$(git rev-parse HEAD)" >> $env:GITHUB_OUTPUT
+  build:
+    needs: [version]
+    if: always() && (needs.version.result == 'success' || needs.version.result == 'skipped')
+    runs-on: windows-2022
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ needs.version.outputs.commit || github.sha }}
+          persist-credentials: false
+      - name: Build Release and run tests
+        shell: pwsh
+        run: ./build.bat
+      - name: Build Debug and run tests
+        shell: pwsh
+        run: ./build.bat -Configuration Debug
+      - name: Package portable application
+        id: package
+        shell: pwsh
+        run: |
+          $version = ./tools/version.ps1
+          New-Item -ItemType Directory -Path package/MdAmp -Force | Out-Null
+          Copy-Item build/Release/bin/MdAmp.exe package/MdAmp/
+          Copy-Item build/Release/bin/plugins package/MdAmp/ -Recurse
+          Copy-Item README.md,VERSION,THIRD_PARTY_NOTICES.md package/MdAmp/
+          Copy-Item third_party/miniaudio/LICENSE package/MdAmp/MINIAUDIO-LICENSE.txt
+          Compress-Archive -Path package/MdAmp -DestinationPath "MdAmp-$version-Windows-x64.zip"
+          "version=$version" >> $env:GITHUB_OUTPUT
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: MdAmp-${{ steps.package.outputs.version }}-Windows-x64
+          path: MdAmp-*-Windows-x64.zip
+          if-no-files-found: error

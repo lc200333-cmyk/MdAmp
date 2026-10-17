@@ -6,8 +6,7 @@
 
 namespace mdamp {
 inline constexpr wchar_t kApplicationName[] = L"MdAmp";
-inline constexpr wchar_t kWindowTitle[] = L"MdAmp — project scaffold";
-inline constexpr wchar_t kVersion[] = L"0.1.0-dev";
+inline constexpr wchar_t kWindowTitle[] = L"MdAmp";
 inline constexpr int kMinimumWidth = 760;
 inline constexpr int kMinimumHeight = 460;
 

@@ -1,0 +1,3 @@
+#pragma once
+#define MDAMP_VERSION "@MDAMP_VERSION@"
+#define MDAMP_VERSION_W L"@MDAMP_VERSION@"

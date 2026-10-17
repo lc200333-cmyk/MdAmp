@@ -1,4 +1,7 @@
 /build/
+/build-*/
+/package/
+/MdAmp-*-Windows-x64.zip
 /out/
 /.vs/
 /CMakeUserPresets.json
